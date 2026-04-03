@@ -63,7 +63,7 @@ Arquivo usado:
 
 Se `instancia` não for informada, usa a instância ativa.
 
-### `./ftpctl sync [instancia]`
+### `./ftpctl sync [instancia] [--verify] [--verify-pending]`
 Executa sincronização incremental manual via FTPS, baseada no arquivo de pendências (`state/<instancia>.pending`).
 
 Se `instancia` não for informada, usa a instância ativa.
@@ -71,12 +71,16 @@ Se `instancia` não for informada, usa a instância ativa.
 Comportamento:
 - Envia apenas arquivos alterados/criados.
 - Remove remoto para itens marcados como `DELETE` no pending.
+- Ao final, exibe resumo com `APPLIED` (confirmado pelo output do lftp) e `PLANNED` (planejado a partir do pending).
 - Usa SSL/FTPS conforme configuração da instância.
 - Usa lock de sync em `state/<instancia>.sync.lock` para evitar concorrência.
-- Loga execução em `logs/<instancia>.sync.log`.
+- Log em `logs/<instancia>.sync.log` é opcional (desligado por padrão).
+- Para ativar, configure `SYNC_LOG_ENABLED="true"` (ou `ENABLE_LOGS="true"`) no arquivo da instância.
 - Limpa pendências (`state/<instancia>.pending`) após sucesso.
+- Com `--verify`, valida no remoto os paths alterados e imprime `VERIFY_OK`/`VERIFY_FAIL`.
+- Com `--verify-pending`, valida o que esta pendente no remoto sem fazer upload.
 
-### `./ftpctl sync-all [instancia] [--delete]`
+### `./ftpctl sync-all [instancia] [--delete] [--verify]`
 Executa sincronização completa via `mirror -R` (espelhamento total).
 
 Se `instancia` não for informada, usa a instância ativa.
@@ -86,8 +90,11 @@ Comportamento:
 - Usa SSL/FTPS conforme configuração.
 - Pode ignorar validação de certificado (`FTP_VERIFY_CERT="false"`).
 - Usa lock de sync em `state/<instancia>.sync.lock` para evitar concorrência.
-- Loga execução em `logs/<instancia>.sync.log`.
+- Log em `logs/<instancia>.sync.log` é opcional (desligado por padrão).
+- Para ativar, configure `SYNC_LOG_ENABLED="true"` (ou `ENABLE_LOGS="true"`) no arquivo da instância.
 - Limpa pendências (`state/<instancia>.pending`) após sucesso.
+- Com `--verify`, valida no remoto os paths alterados e imprime `VERIFY_OK`/`VERIFY_FAIL`.
+- Com `--verify-pending`, valida o que esta pendente no remoto sem fazer upload.
 
 Flag opcional:
 - `--delete`: remove no remoto arquivos que não existem localmente.

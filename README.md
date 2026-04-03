@@ -162,6 +162,18 @@ Se houver linha antiga de warning no pending (ex.: fallback polling), limpe:
 : > state/<instancia>.pending
 ```
 
+## Logs de Sync
+
+Por padrão, o sync não grava log em `logs/`.
+
+Para ativar logs por instância, adicione no `instances/<instancia>.conf`:
+
+```bash
+SYNC_LOG_ENABLED="true"
+```
+
+Alternativamente, você pode usar `ENABLE_LOGS="true"`.
+
 ## Segurança e Boas Práticas
 
 - Não commitar credenciais reais (`FTP_PASS`) em repositório público.
