@@ -95,6 +95,31 @@ build_changes_script() {
     fi
 
     local rel act local_path remote_path remote_parent
+    declare -A mkdir_seen=()
+
+    emit_mkdir_tree_once() {
+      local dir="$1"
+      [[ -n "$dir" ]] || return 0
+      [[ "$dir" != "/" ]] || return 0
+
+      dir="${dir//\/\//\/}"
+      local rel cur part
+      rel="${dir#/}"
+      cur=""
+
+      IFS='/' read -r -a parts <<< "$rel"
+      for part in "${parts[@]}"; do
+        [[ -n "$part" ]] || continue
+        cur="$cur/$part"
+        if [[ -z "${mkdir_seen[$cur]:-}" ]]; then
+          mkdir_seen["$cur"]=1
+          # Some FTP servers fail when dir already exists; make this idempotent.
+          echo "set cmd:fail-exit false"
+          echo "mkdir \"$cur\""
+          echo "set cmd:fail-exit true"
+        fi
+      done
+    }
     : > "$planned_summary_file"
     for rel in "${!latest_action[@]}"; do
       act="${latest_action[$rel]}"
@@ -111,20 +136,18 @@ build_changes_script() {
       case "$act" in
         CREATE|MODIFY)
           if [[ -d "$local_path" ]]; then
-            if [[ "$remote_path" != "/" ]]; then
-              echo "mkdir -p \"$remote_path\""
-            fi
+            emit_mkdir_tree_once "$remote_path"
             echo "MKDIR $remote_path" >> "$planned_summary_file"
           elif [[ -f "$local_path" ]]; then
-            if [[ "$remote_parent" != "/" ]]; then
-              echo "mkdir -p \"$remote_parent\""
-            fi
+            emit_mkdir_tree_once "$remote_parent"
             echo "put -O \"$remote_parent\" \"$local_path\""
             echo "UPLOAD $remote_path" >> "$planned_summary_file"
           fi
           ;;
         DELETE)
+          echo "set cmd:fail-exit false"
           echo "rm -r -f \"$remote_path\""
+          echo "set cmd:fail-exit true"
           echo "DELETE $remote_path" >> "$planned_summary_file"
           ;;
       esac
