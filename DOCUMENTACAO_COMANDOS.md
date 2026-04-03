@@ -152,3 +152,57 @@ Exemplos:
 ./ftpctl remote-ls brold_burguer
 ./ftpctl remote-ls brold_burguer /frota
 ```
+
+### `./ftpctl remote-diff [instancia] [--both|--to-local|--to-remote]`
+Mostra diferenças em modo dry-run entre local e remoto.
+
+Padrao: mostra apenas `REMOTO -> LOCAL` (seguro para auditoria sem risco de confundir com deploy).
+
+Opcoes:
+- `--to-local`: somente remoto para local (padrao)
+- `--to-remote`: somente local para remoto
+- `--both`: mostra os dois lados
+
+As exclusoes da instancia (`EXCLUDES`) sao aplicadas no dry-run.
+
+Não altera arquivos em nenhum lado.
+
+### `./ftpctl pull [instancia] <arquivo_remoto> [destino_local] [-y|--yes]`
+Baixa um arquivo remoto para o ambiente local.
+
+Comportamento:
+- Se `instancia` não for informada, usa a instância ativa.
+- Se `destino_local` nao for informado, salva em `LOCAL_DIR` preservando a arvore relativa a `REMOTE_DIR`.
+- Se o arquivo já existir localmente, pede confirmação.
+- Com `-y`/`--yes`, sobrescreve sem perguntar.
+
+Exemplos:
+
+```bash
+./ftpctl pull /frota/logs/error.log
+# Salva em: LOCAL_DIR/frota/logs/error.log (quando REMOTE_DIR=/)
+./ftpctl pull brold_burguer /frota/logs/error.log
+./ftpctl pull brold_burguer /frota/logs/error.log /tmp -y
+```
+
+Atualizacao `remote-diff`:
+- Agora lista apenas caminhos essenciais (FILE/DIR/DEL), sem verbosidade do lftp.
+- Por padrao, mostra `REMOTO -> LOCAL`.
+- Ao final pergunta se deseja baixar as diferencas.
+- Use `--apply` (ou `-y`) para aplicar sem perguntar.
+
+### `./ftpctl remote-recent [instancia]`
+Lista somente arquivos remotos alterados/criados na última 1 hora.
+
+Características:
+- Não baixa arquivos.
+- Não altera nada no local.
+- Exibe saída enxuta (apenas caminhos).
+- Respeita `EXCLUDES` da instância.
+
+Exemplo:
+
+```bash
+./ftpctl remote-recent
+./ftpctl remote-recent brold_burguer
+```

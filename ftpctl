@@ -31,7 +31,11 @@ Comandos:
   pending [instancia]     Mostra alteracoes pendentes
   sync [instancia] [--verify] [--verify-pending]  Sincroniza alteracoes pendentes
   sync-all [instancia] [--delete] [--verify]  Espelha diretorio completo
+  remote-diff [instancia] [--both|--to-local|--to-remote] [--apply|-y]
+                          Lista diferencas (dry-run) e opcionalmente baixa remoto->local
+  remote-recent [instancia]  Lista arquivos remotos alterados/criados na ultima 1 hora
   remote-ls [instancia] [diretorio]  Lista diretorio remoto via FTPS
+  pull [instancia] <arquivo_remoto> [destino_local] [-y|--yes]  Baixa arquivo remoto
 USAGE
 }
 
@@ -364,6 +368,356 @@ bye
 LFTP_CMDS
 }
 
+cmd_remote_diff() {
+  ensure_base_dirs
+  local instance_arg=""
+  local mode="to-local"
+  local auto_apply="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --both) mode="both" ;;
+      --to-local) mode="to-local" ;;
+      --to-remote) mode="to-remote" ;;
+      --apply|-y) auto_apply="true" ;;
+      *)
+        if [[ -z "$instance_arg" ]]; then
+          instance_arg="$1"
+        else
+          err "Uso: ftpctl remote-diff [instancia] [--both|--to-local|--to-remote] [--apply|-y]"
+          exit 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  local instance
+  instance="$(need_instance_or_exit "$instance_arg")"
+  load_instance_conf "$instance"
+
+  if ! command -v lftp >/dev/null 2>&1; then
+    err "lftp nao encontrado. Instale lftp."
+    exit 1
+  fi
+
+  local ssl_force ssl_verify
+  ssl_force="false"
+  ssl_verify="false"
+  case "${FTP_SSL:-true}" in
+    true|TRUE|1|yes|YES|on|ON) ssl_force="true" ;;
+  esac
+  case "${FTP_VERIFY_CERT:-false}" in
+    true|TRUE|1|yes|YES|on|ON) ssl_verify="true" ;;
+  esac
+
+  local exclude_args=""
+  if declare -p EXCLUDES >/dev/null 2>&1; then
+    local ex
+    for ex in "${EXCLUDES[@]}"; do
+      exclude_args+=" --exclude-glob $(printf '%q' "$ex")"
+    done
+  fi
+
+  echo "Instancia: $instance"
+  echo "LOCAL_DIR: $LOCAL_DIR"
+  echo "REMOTE_DIR: $REMOTE_DIR"
+  echo "----------------------------------------"
+
+  local dry_to_local_file dry_to_remote_file
+  dry_to_local_file="$TMP_DIR/${instance}.remote_diff.to_local.out"
+  dry_to_remote_file="$TMP_DIR/${instance}.remote_diff.to_remote.out"
+  : > "$dry_to_local_file"
+  : > "$dry_to_remote_file"
+
+  extract_diff_paths() {
+    local src_file="$1"
+    while IFS= read -r line; do
+      case "$line" in
+        "Transferindo arquivo "*)
+          path="${line#Transferindo arquivo \`}"
+          path="${path%\'}"
+          echo "FILE $path"
+          ;;
+        "Criando diretório "*)
+          path="${line#Criando diretório \`}"
+          path="${path%\'}"
+          echo "DIR  $path"
+          ;;
+        "Removendo arquivo antigo "*)
+          path="${line#Removendo arquivo antigo \`}"
+          path="${path%\'}"
+          echo "DEL  $path"
+          ;;
+      esac
+    done < "$src_file"
+  }
+
+  show_diff_list() {
+    local title="$1"
+    local src_file="$2"
+    local count
+    count="$(extract_diff_paths "$src_file" | sort -u | tee "$TMP_DIR/${instance}.remote_diff.list.tmp" | wc -l | tr -d '[:space:]')"
+    echo "$title"
+    if [[ "$count" == "0" ]]; then
+      echo "SEM_DIFERENCAS"
+    else
+      cat "$TMP_DIR/${instance}.remote_diff.list.tmp"
+    fi
+    rm -f "$TMP_DIR/${instance}.remote_diff.list.tmp"
+    echo "Total: $count"
+  }
+
+  if [[ "$mode" == "to-remote" || "$mode" == "both" ]]; then
+    # shellcheck disable=SC2086
+    lftp -u "$FTP_USER,$FTP_PASS" "$FTP_HOST" > "$dry_to_remote_file" 2>&1 <<LFTP_CMDS
+set ftp:ssl-force $ssl_force
+set ftp:ssl-protect-data true
+set ssl:verify-certificate $ssl_verify
+set cmd:fail-exit yes
+mirror -R "$LOCAL_DIR" "$REMOTE_DIR" --verbose --dry-run $exclude_args
+bye
+LFTP_CMDS
+    show_diff_list "[A] Diferencas LOCAL -> REMOTO (dry-run):" "$dry_to_remote_file"
+    echo "----------------------------------------"
+  fi
+
+  local to_local_count="0"
+  if [[ "$mode" == "to-local" || "$mode" == "both" ]]; then
+    # shellcheck disable=SC2086
+    lftp -u "$FTP_USER,$FTP_PASS" "$FTP_HOST" > "$dry_to_local_file" 2>&1 <<LFTP_CMDS
+set ftp:ssl-force $ssl_force
+set ftp:ssl-protect-data true
+set ssl:verify-certificate $ssl_verify
+set cmd:fail-exit yes
+mirror "$REMOTE_DIR" "$LOCAL_DIR" --verbose --dry-run $exclude_args
+bye
+LFTP_CMDS
+
+    show_diff_list "[B] Diferencas REMOTO -> LOCAL (dry-run):" "$dry_to_local_file"
+    to_local_count="$(extract_diff_paths "$dry_to_local_file" | sort -u | wc -l | tr -d '[:space:]')"
+
+    if [[ "$to_local_count" != "0" ]]; then
+      local should_apply="false"
+      if [[ "$auto_apply" == "true" ]]; then
+        should_apply="true"
+      else
+        printf "Deseja baixar agora as diferencas REMOTO -> LOCAL? [y/N] "
+        read -r ans
+        case "${ans,,}" in
+          y|yes) should_apply="true" ;;
+        esac
+      fi
+
+      if [[ "$should_apply" == "true" ]]; then
+        local apply_out
+        apply_out="$TMP_DIR/${instance}.remote_diff.apply.out"
+        # shellcheck disable=SC2086
+        if lftp -u "$FTP_USER,$FTP_PASS" "$FTP_HOST" > "$apply_out" 2>&1 <<LFTP_CMDS
+set ftp:ssl-force $ssl_force
+set ftp:ssl-protect-data true
+set ssl:verify-certificate $ssl_verify
+set cmd:fail-exit yes
+mirror "$REMOTE_DIR" "$LOCAL_DIR" $exclude_args
+bye
+LFTP_CMDS
+        then
+          echo "DOWNLOAD_CONCLUIDO remoto -> local"
+        else
+          err "Falha ao baixar diferencas remoto -> local."
+          sed -n '1,120p' "$apply_out" >&2
+          exit 1
+        fi
+      else
+        echo "Download nao executado."
+      fi
+    fi
+  fi
+}
+
+cmd_remote_recent() {
+  ensure_base_dirs
+  local instance_arg="${1:-}"
+  local instance
+  instance="$(need_instance_or_exit "$instance_arg")"
+  load_instance_conf "$instance"
+
+  if ! command -v lftp >/dev/null 2>&1; then
+    err "lftp nao encontrado. Instale lftp."
+    exit 1
+  fi
+
+  local ssl_force ssl_verify
+  ssl_force="false"
+  ssl_verify="false"
+  case "${FTP_SSL:-true}" in
+    true|TRUE|1|yes|YES|on|ON) ssl_force="true" ;;
+  esac
+  case "${FTP_VERIFY_CERT:-false}" in
+    true|TRUE|1|yes|YES|on|ON) ssl_verify="true" ;;
+  esac
+
+  local exclude_args=""
+  if declare -p EXCLUDES >/dev/null 2>&1; then
+    local ex
+    for ex in "${EXCLUDES[@]}"; do
+      exclude_args+=" --exclude-glob $(printf '%q' "$ex")"
+    done
+  fi
+
+  local out_file
+  out_file="$TMP_DIR/${instance}.remote_recent.out"
+  : > "$out_file"
+
+  # Uses lftp mirror dry-run with time filter to avoid verbose full sync behavior.
+  # shellcheck disable=SC2086
+  if ! lftp -u "$FTP_USER,$FTP_PASS" "$FTP_HOST" > "$out_file" 2>&1 <<LFTP_CMDS
+set ftp:ssl-force $ssl_force
+set ftp:ssl-protect-data true
+set ssl:verify-certificate $ssl_verify
+set cmd:fail-exit yes
+mirror "$REMOTE_DIR" "$LOCAL_DIR" --verbose --dry-run --newer-than now-1hour $exclude_args
+bye
+LFTP_CMDS
+  then
+    err "Falha ao consultar arquivos recentes no remoto."
+    sed -n '1,120p' "$out_file" >&2
+    exit 1
+  fi
+
+  echo "Instancia: $instance"
+  echo "Janela: ultimas 1h"
+  echo "Diretorio remoto base: $REMOTE_DIR"
+  echo "----------------------------------------"
+
+  local count
+  count="$(awk '
+    /^Transferindo arquivo /{
+      p=$0
+      sub(/^Transferindo arquivo `/, "", p)
+      sub(/'\''$/, "", p)
+      print p
+    }' "$out_file" | sort -u | tee "$TMP_DIR/${instance}.remote_recent.list" | wc -l | tr -d "[:space:]")"
+
+  if [[ "$count" == "0" ]]; then
+    echo "SEM_ALTERACOES_REMOTAS_NA_ULTIMA_1H"
+  else
+    cat "$TMP_DIR/${instance}.remote_recent.list"
+  fi
+  echo "Total: $count"
+
+  rm -f "$TMP_DIR/${instance}.remote_recent.list" "$out_file"
+}
+
+cmd_pull() {
+  ensure_base_dirs
+
+  local yes_flag="false"
+  local args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -y|--yes) yes_flag="true" ;;
+      *) args+=("$1") ;;
+    esac
+    shift
+  done
+
+  local instance_arg=""
+  local remote_file=""
+  local local_dest=""
+
+  if [[ ${#args[@]} -eq 0 ]]; then
+    err "Uso: ftpctl pull [instancia] <arquivo_remoto> [destino_local] [-y|--yes]"
+    exit 1
+  fi
+
+  if instance_exists "${args[0]}"; then
+    instance_arg="${args[0]}"
+    [[ ${#args[@]} -ge 2 ]] || { err "Informe <arquivo_remoto>"; exit 1; }
+    remote_file="${args[1]}"
+    if [[ ${#args[@]} -ge 3 ]]; then
+      local_dest="${args[2]}"
+    fi
+  else
+    remote_file="${args[0]}"
+    if [[ ${#args[@]} -ge 2 ]]; then
+      local_dest="${args[1]}"
+    fi
+  fi
+
+  local instance
+  instance="$(need_instance_or_exit "$instance_arg")"
+  load_instance_conf "$instance"
+
+  if ! command -v lftp >/dev/null 2>&1; then
+    err "lftp nao encontrado. Instale lftp."
+    exit 1
+  fi
+
+  # Default behavior: preserve remote tree inside LOCAL_DIR.
+  # Example: REMOTE_DIR=/ and remote_file=/frota/logs/a.log -> LOCAL_DIR/frota/logs/a.log
+  # Example: REMOTE_DIR=/frota and remote_file=/frota/logs/a.log -> LOCAL_DIR/logs/a.log
+  local normalized_remote normalized_root rel_path target_file target_dir
+  normalized_remote="$remote_file"
+  normalized_root="$REMOTE_DIR"
+  [[ "$normalized_remote" == /* ]] || normalized_remote="/$normalized_remote"
+  [[ "$normalized_root" == /* ]] || normalized_root="/$normalized_root"
+
+  if [[ "$normalized_root" != "/" ]]; then
+    if [[ "$normalized_remote" == "$normalized_root" ]]; then
+      rel_path="$(basename "$normalized_remote")"
+    elif [[ "$normalized_remote" == "$normalized_root/"* ]]; then
+      rel_path="${normalized_remote#"$normalized_root"/}"
+    else
+      err "Arquivo remoto '$remote_file' esta fora de REMOTE_DIR='$REMOTE_DIR'"
+      exit 1
+    fi
+  else
+    rel_path="${normalized_remote#/}"
+  fi
+
+  if [[ -n "$local_dest" ]]; then
+    target_file="$local_dest/$(basename "$normalized_remote")"
+  else
+    target_file="$LOCAL_DIR/$rel_path"
+  fi
+
+  target_dir="$(dirname "$target_file")"
+  mkdir -p "$target_dir"
+
+  if [[ -e "$target_file" && "$yes_flag" != "true" ]]; then
+    printf "Arquivo local ja existe: %s. Sobrescrever? [y/N] " "$target_file"
+    read -r ans
+    case "${ans,,}" in
+      y|yes) ;;
+      *)
+        echo "Cancelado."
+        exit 0
+        ;;
+    esac
+  fi
+
+  local ssl_force ssl_verify
+  ssl_force="false"
+  ssl_verify="false"
+  case "${FTP_SSL:-true}" in
+    true|TRUE|1|yes|YES|on|ON) ssl_force="true" ;;
+  esac
+  case "${FTP_VERIFY_CERT:-false}" in
+    true|TRUE|1|yes|YES|on|ON) ssl_verify="true" ;;
+  esac
+
+lftp -u "$FTP_USER,$FTP_PASS" "$FTP_HOST" <<LFTP_CMDS
+set ftp:ssl-force $ssl_force
+set ftp:ssl-protect-data true
+set ssl:verify-certificate $ssl_verify
+set cmd:fail-exit yes
+get -o "$target_file" "$normalized_remote"
+bye
+LFTP_CMDS
+
+  echo "Download concluido: $target_file"
+}
+
 main() {
   ensure_base_dirs
 
@@ -382,7 +736,10 @@ main() {
     pending) cmd_pending "$@" ;;
     sync) cmd_sync "$@" ;;
     sync-all) cmd_sync_all "$@" ;;
+    remote-diff) cmd_remote_diff "$@" ;;
+    remote-recent) cmd_remote_recent "$@" ;;
     remote-ls) cmd_remote_ls "$@" ;;
+    pull) cmd_pull "$@" ;;
     -h|--help|help) usage ;;
     *)
       err "Comando desconhecido: $cmd"
