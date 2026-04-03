@@ -1,0 +1,19 @@
+# Runtime/state artifacts
+logs/
+state/*.pending
+state/*.watch.pid
+state/*.sync.lock
+tmp/
+
+# Local active instance selection
+state/current_instance
+
+# Sensitive instance configs (credentials)
+instances/*.conf
+!instances/*.example.conf
+
+# Optional local shell history/editor noise
+*.swp
+*.swo
+*~
+.DS_Store

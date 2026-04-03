@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+  REAL_PATH="$(readlink -f "$SCRIPT_PATH" 2>/dev/null || true)"
+  if [[ -n "${REAL_PATH:-}" ]]; then
+    SCRIPT_PATH="$REAL_PATH"
+  fi
+fi
+ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/bin/common.sh"
+
+WATCH_SCRIPT="$ROOT_DIR/bin/watch_instance.sh"
+SYNC_SCRIPT="$ROOT_DIR/bin/sync_instance.sh"
+
+usage() {
+  cat <<USAGE
+Uso: ftpctl <comando> [opcoes]
+
+Comandos:
+  list                    Lista instancias disponiveis
+  create <instancia>      Cria arquivo de configuracao de instancia
+  use <instancia>         Define instancia ativa
+  current                 Mostra instancia ativa
+  watch [instancia]       Inicia watcher em background
+  stop [instancia]        Para watcher da instancia
+  status [instancia]      Mostra status do watcher
+  pending [instancia]     Mostra alteracoes pendentes
+  sync [instancia] [--delete]  Sincroniza via FTPS manualmente
+  remote-ls [instancia] [diretorio]  Lista diretorio remoto via FTPS
+USAGE
+}
+
+need_instance_or_exit() {
+  local instance
+  if ! instance="$(resolve_instance "${1:-}")"; then
+    err "Nenhuma instancia informada e nenhuma instancia ativa definida."
+    err "Use: ftpctl use <instancia>"
+    exit 1
+  fi
+
+  if ! instance_exists "$instance"; then
+    err "Instancia '$instance' nao encontrada."
+    exit 1
+  fi
+
+  echo "$instance"
+}
+
+cmd_list() {
+  ensure_base_dirs
+
+  local cur=""
+  cur="$(get_current_instance 2>/dev/null || true)"
+
+  local has_any="false"
+  while IFS= read -r inst; do
+    has_any="true"
+    if [[ -n "$cur" && "$inst" == "$cur" ]]; then
+      echo "* $inst (ativa)"
+    else
+      echo "- $inst"
+    fi
+  done < <(list_instances)
+
+  if [[ "$has_any" == "false" ]]; then
+    echo "Nenhuma instancia encontrada em $INSTANCES_DIR"
+  fi
+}
+
+cmd_create() {
+  ensure_base_dirs
+
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || { err "Informe uma instancia: ftpctl create <instancia>"; exit 1; }
+
+  if [[ ! "$instance" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    err "Nome de instancia invalido. Use apenas letras, numeros, _ ou -."
+    exit 1
+  fi
+
+  local conf_file
+  conf_file="$(instance_conf_path "$instance")"
+
+  if [[ -f "$conf_file" ]]; then
+    err "Instancia '$instance' ja existe em $conf_file"
+    exit 1
+  fi
+
+  cat > "$conf_file" <<EOF
+# Proteja este arquivo (contem credenciais): chmod 600 instances/*.conf
+INSTANCE_NAME="$instance"
+
+LOCAL_DIR="/caminho/local/do/projeto"
+REMOTE_DIR="/caminho/remoto"
+
+FTP_HOST="ftp.seudominio.com"
+FTP_USER="usuario"
+FTP_PASS="CHANGE_ME"
+
+FTP_SSL="true"
+FTP_VERIFY_CERT="false"
+
+EXCLUDES=(
+  ".git/"
+  ".github/"
+  "*.log"
+  "node_modules/"
+)
+EOF
+
+  chmod 600 "$conf_file"
+  echo "Instancia criada: $instance"
+  echo "Arquivo: $conf_file"
+  echo "Proximo passo: edite LOCAL_DIR/REMOTE_DIR/credenciais e rode: ./ftpctl use $instance"
+}
+
+cmd_use() {
+  ensure_base_dirs
+  local instance="${1:-}"
+  [[ -n "$instance" ]] || { err "Informe uma instancia: ftpctl use <instancia>"; exit 1; }
+
+  if ! instance_exists "$instance"; then
+    err "Instancia '$instance' nao encontrada."
+    exit 1
+  fi
+
+  set_current_instance "$instance"
+  echo "Instancia ativa: $instance"
+}
+
+cmd_current() {
+  ensure_base_dirs
+  if cur="$(get_current_instance 2>/dev/null)"; then
+    echo "$cur"
+  else
+    echo "Nenhuma instancia ativa. Use: ftpctl use <instancia>"
+    exit 1
+  fi
+}
+
+cmd_watch() {
+  ensure_base_dirs
+  local instance
+  instance="$(need_instance_or_exit "${1:-}")"
+
+  if watcher_running "$instance"; then
+    local pid
+    pid="$(tr -d '[:space:]' < "$(instance_pid_file "$instance")")"
+    echo "Watcher ja esta rodando para '$instance' (PID $pid)"
+    return 0
+  fi
+
+  nohup "$WATCH_SCRIPT" "$instance" > "$LOGS_DIR/${instance}.watch.log" 2>&1 &
+  sleep 0.2
+
+  if watcher_running "$instance"; then
+    local pid
+    pid="$(tr -d '[:space:]' < "$(instance_pid_file "$instance")")"
+    echo "Watcher iniciado para '$instance' (PID $pid)"
+  else
+    err "Falha ao iniciar watcher. Verifique: $LOGS_DIR/${instance}.watch.log"
+    exit 1
+  fi
+}
+
+cmd_stop() {
+  ensure_base_dirs
+  local instance
+  instance="$(need_instance_or_exit "${1:-}")"
+
+  local pid_file
+  pid_file="$(instance_pid_file "$instance")"
+
+  if [[ ! -f "$pid_file" ]]; then
+    echo "Watcher nao esta rodando para '$instance'"
+    return 0
+  fi
+
+  local pid
+  pid="$(tr -d '[:space:]' < "$pid_file")"
+
+  if is_pid_running "$pid"; then
+    kill "$pid" 2>/dev/null || true
+    sleep 0.2
+    if is_pid_running "$pid"; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    echo "Watcher parado para '$instance'"
+  else
+    echo "Watcher nao estava ativo para '$instance'"
+  fi
+
+  rm -f "$pid_file"
+}
+
+cmd_status() {
+  ensure_base_dirs
+  local instance
+  instance="$(need_instance_or_exit "${1:-}")"
+
+  if watcher_running "$instance"; then
+    local pid
+    pid="$(tr -d '[:space:]' < "$(instance_pid_file "$instance")")"
+    echo "RUNNING - instancia '$instance' (PID $pid)"
+  else
+    echo "STOPPED - instancia '$instance'"
+  fi
+}
+
+cmd_pending() {
+  ensure_base_dirs
+  local instance
+  instance="$(need_instance_or_exit "${1:-}")"
+
+  local pending_file
+  pending_file="$(instance_pending_file "$instance")"
+
+  if [[ ! -s "$pending_file" ]]; then
+    echo "Sem alteracoes pendentes para '$instance'"
+    return 0
+  fi
+
+  cat "$pending_file"
+}
+
+cmd_sync() {
+  ensure_base_dirs
+
+  local instance_arg=""
+  local delete_flag=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --delete)
+        delete_flag="--delete"
+        ;;
+      *)
+        if [[ -z "$instance_arg" ]]; then
+          instance_arg="$1"
+        else
+          err "Parametro invalido: $1"
+          exit 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  local instance
+  instance="$(need_instance_or_exit "$instance_arg")"
+
+  if [[ -n "$delete_flag" ]]; then
+    "$SYNC_SCRIPT" "$instance" --delete
+  else
+    "$SYNC_SCRIPT" "$instance"
+  fi
+
+  echo "Sync finalizado para '$instance'. Log: $LOGS_DIR/${instance}.sync.log"
+}
+
+cmd_remote_ls() {
+  ensure_base_dirs
+
+  local instance_arg=""
+  local remote_dir_arg=""
+
+  if [[ $# -gt 0 ]]; then
+    if instance_exists "$1"; then
+      instance_arg="$1"
+      shift
+    fi
+  fi
+
+  if [[ $# -gt 0 ]]; then
+    remote_dir_arg="$1"
+    shift
+  fi
+
+  if [[ $# -gt 0 ]]; then
+    err "Uso: ftpctl remote-ls [instancia] [diretorio]"
+    exit 1
+  fi
+
+  local instance
+  instance="$(need_instance_or_exit "$instance_arg")"
+  load_instance_conf "$instance"
+
+  if ! command -v lftp >/dev/null 2>&1; then
+    err "lftp nao encontrado. Instale lftp."
+    exit 1
+  fi
+
+  local target_dir
+  target_dir="${remote_dir_arg:-$REMOTE_DIR}"
+
+  local ssl_force ssl_verify
+  ssl_force="false"
+  ssl_verify="false"
+  case "${FTP_SSL:-true}" in
+    true|TRUE|1|yes|YES|on|ON) ssl_force="true" ;;
+  esac
+  case "${FTP_VERIFY_CERT:-false}" in
+    true|TRUE|1|yes|YES|on|ON) ssl_verify="true" ;;
+  esac
+
+  echo "Instancia: $instance"
+  echo "Host: $FTP_HOST"
+  echo "Remote dir alvo: $target_dir"
+  echo "----------------------------------------"
+
+  lftp -u "$FTP_USER,$FTP_PASS" "$FTP_HOST" <<LFTP_CMDS
+set ftp:ssl-force $ssl_force
+set ftp:ssl-protect-data true
+set ssl:verify-certificate $ssl_verify
+set cmd:fail-exit yes
+pwd
+cls -la "$target_dir"
+bye
+LFTP_CMDS
+}
+
+main() {
+  ensure_base_dirs
+
+  local cmd="${1:-}"
+  [[ -n "$cmd" ]] || { usage; exit 1; }
+  shift || true
+
+  case "$cmd" in
+    list) cmd_list "$@" ;;
+    create) cmd_create "$@" ;;
+    use) cmd_use "$@" ;;
+    current) cmd_current "$@" ;;
+    watch) cmd_watch "$@" ;;
+    stop) cmd_stop "$@" ;;
+    status) cmd_status "$@" ;;
+    pending) cmd_pending "$@" ;;
+    sync) cmd_sync "$@" ;;
+    remote-ls) cmd_remote_ls "$@" ;;
+    -h|--help|help) usage ;;
+    *)
+      err "Comando desconhecido: $cmd"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
