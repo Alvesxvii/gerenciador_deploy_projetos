@@ -229,7 +229,22 @@ cmd_pending() {
     return 0
   fi
 
-  cat "$pending_file"
+  awk '
+    {
+      line[NR] = $0
+      action = $3
+      path = $0
+      sub(/^\[[^]]+\] [A-Z_]+ /, "", path)
+      key[path] = NR
+    }
+    END {
+      for (i = 1; i <= NR; i++) {
+        path = line[i]
+        sub(/^\[[^]]+\] [A-Z_]+ /, "", path)
+        if (key[path] == i) print line[i]
+      }
+    }
+  ' "$pending_file"
 }
 
 cmd_sync() {

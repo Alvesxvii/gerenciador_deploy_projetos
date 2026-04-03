@@ -105,21 +105,26 @@ build_changes_script() {
       remote_parent="${remote_path%/*}"
       [[ "$remote_parent" == "$remote_path" ]] && remote_parent="$remote_dir"
       remote_parent="${remote_parent//\/\//\/}"
+      [[ -n "$remote_parent" ]] || remote_parent="$remote_dir"
+      [[ -n "$remote_parent" ]] || remote_parent="/"
 
       case "$act" in
         CREATE|MODIFY)
           if [[ -d "$local_path" ]]; then
-            echo "mkdir -p \"$remote_path\""
+            if [[ "$remote_path" != "/" ]]; then
+              echo "mkdir -p \"$remote_path\""
+            fi
             echo "MKDIR $remote_path" >> "$planned_summary_file"
           elif [[ -f "$local_path" ]]; then
-            echo "mkdir -p \"$remote_parent\""
+            if [[ "$remote_parent" != "/" ]]; then
+              echo "mkdir -p \"$remote_parent\""
+            fi
             echo "put -O \"$remote_parent\" \"$local_path\""
             echo "UPLOAD $remote_path" >> "$planned_summary_file"
           fi
           ;;
         DELETE)
-          echo "rm -f \"$remote_path\""
-          echo "rmdir \"$remote_path\""
+          echo "rm -r -f \"$remote_path\""
           echo "DELETE $remote_path" >> "$planned_summary_file"
           ;;
       esac
