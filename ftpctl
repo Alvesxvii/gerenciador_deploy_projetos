@@ -29,7 +29,8 @@ Comandos:
   stop [instancia]        Para watcher da instancia
   status [instancia]      Mostra status do watcher
   pending [instancia]     Mostra alteracoes pendentes
-  sync [instancia] [--delete]  Sincroniza via FTPS manualmente
+  sync [instancia]        Sincroniza apenas alteracoes pendentes
+  sync-all [instancia] [--delete]  Espelha diretorio completo
   remote-ls [instancia] [diretorio]  Lista diretorio remoto via FTPS
 USAGE
 }
@@ -231,6 +232,23 @@ cmd_sync() {
   ensure_base_dirs
 
   local instance_arg=""
+  [[ $# -gt 1 ]] && { err "Uso: ftpctl sync [instancia]"; exit 1; }
+  if [[ $# -eq 1 ]]; then
+    instance_arg="$1"
+  fi
+
+  local instance
+  instance="$(need_instance_or_exit "$instance_arg")"
+
+  "$SYNC_SCRIPT" "$instance" --mode changes
+
+  echo "Sync incremental finalizado para '$instance'. Log: $LOGS_DIR/${instance}.sync.log"
+}
+
+cmd_sync_all() {
+  ensure_base_dirs
+
+  local instance_arg=""
   local delete_flag=""
 
   while [[ $# -gt 0 ]]; do
@@ -254,12 +272,12 @@ cmd_sync() {
   instance="$(need_instance_or_exit "$instance_arg")"
 
   if [[ -n "$delete_flag" ]]; then
-    "$SYNC_SCRIPT" "$instance" --delete
+    "$SYNC_SCRIPT" "$instance" --mode all --delete
   else
-    "$SYNC_SCRIPT" "$instance"
+    "$SYNC_SCRIPT" "$instance" --mode all
   fi
 
-  echo "Sync finalizado para '$instance'. Log: $LOGS_DIR/${instance}.sync.log"
+  echo "Sync completo finalizado para '$instance'. Log: $LOGS_DIR/${instance}.sync.log"
 }
 
 cmd_remote_ls() {
@@ -340,6 +358,7 @@ main() {
     status) cmd_status "$@" ;;
     pending) cmd_pending "$@" ;;
     sync) cmd_sync "$@" ;;
+    sync-all) cmd_sync_all "$@" ;;
     remote-ls) cmd_remote_ls "$@" ;;
     -h|--help|help) usage ;;
     *)

@@ -87,7 +87,8 @@ chmod 600 instances/*.conf
 ./ftpctl stop [instancia]
 ./ftpctl status [instancia]
 ./ftpctl pending [instancia]
-./ftpctl sync [instancia] [--delete]
+./ftpctl sync [instancia]
+./ftpctl sync-all [instancia] [--delete]
 ./ftpctl remote-ls [instancia] [diretorio]
 ```
 
@@ -106,10 +107,11 @@ Referência completa: `DOCUMENTACAO_COMANDOS.md`.
 ./ftpctl sync
 ```
 
-Com remoção remota:
+Para espelhamento completo:
 
 ```bash
-./ftpctl sync --delete
+./ftpctl sync-all
+./ftpctl sync-all --delete
 ```
 
 ## Auditoria de Destino Remoto

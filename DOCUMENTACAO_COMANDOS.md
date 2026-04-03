@@ -63,8 +63,21 @@ Arquivo usado:
 
 Se `instancia` não for informada, usa a instância ativa.
 
-### `./ftpctl sync [instancia] [--delete]`
-Executa sincronização manual via FTPS usando `lftp` e `mirror -R`.
+### `./ftpctl sync [instancia]`
+Executa sincronização incremental manual via FTPS, baseada no arquivo de pendências (`state/<instancia>.pending`).
+
+Se `instancia` não for informada, usa a instância ativa.
+
+Comportamento:
+- Envia apenas arquivos alterados/criados.
+- Remove remoto para itens marcados como `DELETE` no pending.
+- Usa SSL/FTPS conforme configuração da instância.
+- Usa lock de sync em `state/<instancia>.sync.lock` para evitar concorrência.
+- Loga execução em `logs/<instancia>.sync.log`.
+- Limpa pendências (`state/<instancia>.pending`) após sucesso.
+
+### `./ftpctl sync-all [instancia] [--delete]`
+Executa sincronização completa via `mirror -R` (espelhamento total).
 
 Se `instancia` não for informada, usa a instância ativa.
 
@@ -94,10 +107,11 @@ cd /home/alves/genesis/projects/ftp/gerenciador_deploy_projetos
 ./ftpctl sync
 ```
 
-Para sync com remoção remota:
+Para espelhamento completo:
 
 ```bash
-./ftpctl sync --delete
+./ftpctl sync-all
+./ftpctl sync-all --delete
 ```
 
 ## Dependências
